@@ -1,0 +1,59 @@
+name: dependency-security
+
+on:
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *" # nightly: catches advisories published after the last merge
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write # only used to open an issue when the nightly run fails
+    steps:
+      # Pin third-party actions to commit SHAs in your own repos.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # needed to diff mix.lock against the base branch
+
+      - uses: erlef/setup-beam@v1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: depguard-${{ runner.os }}-${{ hashFiles('mix.lock', '.tool-versions') }}
+
+      - run: mix deps.get
+
+      - name: Dependency security suite
+        env:
+          # Set only on pull requests; the lock-change test is skipped on nightly runs.
+          DEP_GUARD_BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
+          # Only needed for `mix dep_guard.eef` and a future GraphQL-backed check; the suite itself
+          # uses the public OSV feed.
+          EEF_CNA_TOKEN: ${{ secrets.EEF_CNA_TOKEN }}
+        run: mix test test/security
+
+      - name: Open an issue when the nightly run fails
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --title "Dependency security: nightly audit failed" \
+            --body "The nightly dependency audit failed. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}. Triage locally with the /dep-guard command."

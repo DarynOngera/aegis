@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "eef-cna": {
+      "type": "http",
+      "url": "https://cna.erlef.org/mcp"
+    }
+  }
+}
