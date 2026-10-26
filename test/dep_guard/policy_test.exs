@@ -60,7 +60,9 @@ defmodule DepGuard.PolicyTest do
     assert [message] = problems(ignore_advisories: [waiver(%{package: "gone"})])
     assert message =~ "no longer in mix.lock"
 
-    assert [message] = problems(ignore_retirements: [%{package: "plug", version: "1.0.0", reason: "r", expires: "2026-12-01"}])
+    assert [message] =
+             problems(ignore_retirements: [%{package: "plug", version: "1.0.0", reason: "r", expires: "2026-12-01"}])
+
     assert message =~ "pinned to 1.0.0 but mix.lock has 1.16.0"
   end
 

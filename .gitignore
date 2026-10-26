@@ -1,2 +1,4 @@
 _build/
 deps/
+integration/*/mix.lock
+integration/*/out.log

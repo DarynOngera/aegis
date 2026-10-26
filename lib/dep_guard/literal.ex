@@ -9,14 +9,13 @@ defmodule DepGuard.Literal do
 
   @spec parse(String.t()) :: {:ok, term()} | {:error, String.t()}
   def parse(source) when is_binary(source) do
-    case Code.string_to_quoted(source) do
+    case Code.string_to_quoted(source, emit_warnings: false) do
       {:ok, ast} ->
         if literal?(ast) do
           {value, _binding} = Code.eval_quoted(ast)
           {:ok, value}
         else
-          {:error,
-           "contains something other than plain data (function call, variable, sigil or interpolation)"}
+          {:error, "contains something other than plain data (function call, variable, sigil or interpolation)"}
         end
 
       {:error, error} ->

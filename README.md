@@ -3,9 +3,10 @@
 An ExUnit suite that audits an Elixir project's dependencies, plus the tooling to triage failures. Add it
 to every app so the whole company runs the same checks, with the same policy format, in `mix test`.
 
-> **Status:** reviewed but not yet executed. It was written in an environment with no Elixir toolchain.
-> Run `mix test` in this directory first (the library has its own offline tests), then try it on one real app.
-> Things to confirm on first run are listed under "Unverified".
+> **Status:** 52 unit tests pass (Elixir 1.18.4 / OTP 25), and the suite macro has been run end to end against a
+> fixture project (tamper, downgrade, unpinned git, expired waiver, fail-closed online checks). **Not yet verified
+> against real Hex, mix_audit or the EEF feed**: those need network, and the `integration` CI job exists to run them.
+> See "Unverified".
 
 ## What it checks
 
