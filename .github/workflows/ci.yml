@@ -20,18 +20,19 @@ jobs:
       - run: MIX_ENV=test mix compile --warnings-as-errors
       - run: mix test
 
-  # Discovery job: runs the suite against real Hex, mix_audit and the EEF feed, which the
-  # unit tests cannot reach. Not blocking until the expectations below have been confirmed.
+  # Runs the suite against real Hex, mix_audit and the EEF feed, which the unit tests cannot reach.
+  # `pass` projects must produce no findings; `fail` projects must fail, and (if set) the output
+  # must contain `must_contain`.
   integration:
     needs: unit
     runs-on: ubuntu-latest
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
         include:
           - { project: clean, expect: pass }
-          - { project: vulnerable, expect: fail }
+          - { project: vulnerable, expect: fail, must_contain: GHSA-qpmc-wprv-x746 }
+          - { project: eef-affected, expect: fail, must_contain: EEF-CVE-2025-4754 }
     steps:
       - uses: actions/checkout@v4
       - uses: erlef/setup-beam@v1
@@ -52,8 +53,20 @@ jobs:
           if [ "${{ matrix.expect }}" = fail ] && [ "$status" -eq 0 ]; then
             echo "::error::expected findings, suite passed"; exit 1
           fi
+          if [ -n "${{ matrix.must_contain }}" ] && ! grep -q "${{ matrix.must_contain }}" out.log; then
+            echo "::error::expected ${{ matrix.must_contain }} in the suite output"; exit 1
+          fi
+      - name: Surface suite output as an annotation
+        if: always()
+        working-directory: integration/${{ matrix.project }}
+        run: |
+          # Logs and artifacts sit behind storage that API clients cannot always reach;
+          # annotations are readable through the checks API.
+          msg=$(head -c 6000 out.log | tr -d '\r' | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print}')
+          echo "::warning title=suite output (${{ matrix.project }})::$msg"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: suite-log-${{ matrix.project }}
           path: integration/${{ matrix.project }}/out.log
+
