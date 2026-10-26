@@ -3,10 +3,9 @@
 An ExUnit suite that audits an Elixir project's dependencies, plus the tooling to triage failures. Add it
 to every app so the whole company runs the same checks, with the same policy format, in `mix test`.
 
-> **Status:** 52 unit tests pass (Elixir 1.18.4 / OTP 25), and the suite macro has been run end to end against a
-> fixture project (tamper, downgrade, unpinned git, expired waiver, fail-closed online checks). **Not yet verified
-> against real Hex, mix_audit or the EEF feed**: those need network, and the `integration` CI job exists to run them.
-> See "Unverified".
+> **Status:** 53 unit tests pass (Elixir 1.18.4 / OTP 25). Verified in CI against the real services (OTP 27):
+> `mix hex.audit` and `mix deps.audit` run in a subprocess and flag `sweet_xml 0.6.6` (GHSA-qpmc-wprv-x746), the EEF OSV
+> feed per-record URL and record shape, and a clean project passes. See "Unverified" for what remains.
 
 ## What it checks
 
@@ -66,11 +65,15 @@ For an umbrella, run the suite from the umbrella root, or pass `root:` to `use D
 - **Fail closed.** Anything the suite cannot read or evaluate is a failure, not a pass.
 - **Audits run as subprocesses.** `mix hex.audit` must run before the app loads, which a test process has already done. The suite reports each tool's output verbatim.
 
+## Verified notes
+
+- `cna.erlef.org/osv/<id>.json` returns HTTP 406 if the request carries `Accept: application/json`, so the HTTP client sends no `Accept` header.
+- Hex records use `package.ecosystem: "Hex"`, SEMVER ranges and an explicit `versions` list. Each record also has a separate package-less `GIT` entry, which the matcher ignores.
+- `mix hex.audit` on Hex 2.5+ reports advisories as well as retirements, so it overlaps with `mix deps.audit`.
+
 ## Unverified
 
-- The per-record URL of the EEF OSV feed (`<base>/<id>.json`) follows the OSV convention but was not fetched. Override with `eef_osv_base:`.
 - The `/mcp` endpoint and the GraphQL schema beyond `listPublishedCves { results { cveId title } }`.
-- That `mix deps.audit` behaves as expected when run in a subprocess with `MIX_ENV=test`. If it needs compiled deps, run `mix deps.compile` first.
 - The HTTP client needs OTP 25+ and Elixir 1.18+ (built-in `JSON`), or the `:jason` package.
 
 ## Limits

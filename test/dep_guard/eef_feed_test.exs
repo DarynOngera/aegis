@@ -62,4 +62,39 @@ defmodule DepGuard.EefFeedTest do
     assert [message] = EefFeed.matches(odd, %{"esaml" => "1.0.0"})
     assert message =~ "could not be evaluated"
   end
+
+  # Shape taken from the live feed (EEF-CVE-2025-4754): a Hex entry with a SEMVER range and an
+  # explicit versions list, followed by a separate package-less entry that only has a GIT range.
+  @live_shape %{
+    "id" => "EEF-CVE-2025-4754",
+    "aliases" => ["GHSA-f7gq-h8jv-h3cq", "CVE-2025-4754"],
+    "affected" => [
+      %{
+        "package" => %{
+          "ecosystem" => "Hex",
+          "name" => "ash_authentication_phoenix",
+          "purl" => "pkg:hex/ash_authentication_phoenix"
+        },
+        "ranges" => [%{"type" => "SEMVER", "events" => [%{"introduced" => "0.1.0"}, %{"fixed" => "2.10.0"}]}],
+        "versions" => ["2.8.0", "2.9.0"]
+      },
+      %{
+        "ranges" => [
+          %{
+            "type" => "GIT",
+            "repo" => "https://github.com/team-alembic/ash_authentication_phoenix",
+            "events" => [%{"introduced" => "05ab4f43"}, %{"fixed" => "a3253fb4"}]
+          }
+        ]
+      }
+    ]
+  }
+
+  test "matches the real feed shape and ignores package-less GIT entries" do
+    assert [message] = EefFeed.matches(@live_shape, %{"ash_authentication_phoenix" => "2.9.0"})
+    assert message =~ "EEF-CVE-2025-4754 (GHSA-f7gq-h8jv-h3cq, CVE-2025-4754)"
+
+    assert EefFeed.matches(@live_shape, %{"ash_authentication_phoenix" => "2.10.0"}) == []
+    assert EefFeed.matches(@live_shape, %{"unrelated" => "1.0.0"}) == []
+  end
 end
