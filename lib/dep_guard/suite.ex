@@ -27,7 +27,7 @@ defmodule DepGuard.Suite do
     quote bind_quoted: [opts: opts] do
       use ExUnit.Case, async: false
 
-      @moduletag :dep_guard
+      @moduletag :dependency_security
       @dep_guard_opts opts
       base_ref =
         case Keyword.get(opts, :base_ref, System.get_env("DEP_GUARD_BASE_REF")) do
@@ -98,8 +98,6 @@ defmodule DepGuard.Suite do
   def assert_no_problems([]), do: :ok
 
   def assert_no_problems(problems) when is_list(problems) do
-    ExUnit.Assertions.flunk(
-      "#{length(problems)} problem(s):\n\n" <> Enum.map_join(problems, "\n\n", &("  * " <> &1))
-    )
+    ExUnit.Assertions.flunk("#{length(problems)} problem(s):\n\n" <> Enum.map_join(problems, "\n\n", &("  * " <> &1)))
   end
 end

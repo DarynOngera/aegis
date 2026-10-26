@@ -105,7 +105,9 @@ defmodule DepGuard.EefFeed do
               ["#{name} #{version} is affected by #{id}#{aliases}"]
 
             :unknown ->
-              ["#{name} #{version}: #{id}#{aliases} lists this package but the affected range could not be evaluated; review manually"]
+              [
+                "#{name} #{version}: #{id}#{aliases} lists this package but the affected range could not be evaluated; review manually"
+              ]
 
             :unaffected ->
               []
