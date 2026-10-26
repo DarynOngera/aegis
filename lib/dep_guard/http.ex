@@ -23,9 +23,9 @@ defmodule DepGuard.Http do
     {:ok, _} = Application.ensure_all_started(:inets)
     {:ok, _} = Application.ensure_all_started(:ssl)
 
-    headers =
-      [{~c"accept", ~c"application/json"}] ++
-        Enum.map(headers, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
+    # No Accept header on purpose: cna.erlef.org answers `GET /osv/<id>.json` with HTTP 406
+    # when sent `Accept: application/json` (the .json extension already selects the format).
+    headers = Enum.map(headers, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
 
     req =
       case method do

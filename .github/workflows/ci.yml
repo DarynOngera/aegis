@@ -89,5 +89,13 @@ jobs:
           probe "record no-ext accept json" -H "Accept: application/json" "$base/osv/$id"
           probe "cves record .json default" "$base/cves/CVE-2025-4748.json"
           probe "cves index.json default"   "$base/cves/index.json"
+          # Shape of the feed: which ecosystems and range types do records use?
+          mkdir -p /tmp/osv
+          curl -sS "$base/osv/all.json" | jq -r '.[].id' \
+            | xargs -P8 -I{} curl -sS -m 30 -o "/tmp/osv/{}.json" "$base/osv/{}.json"
+          shape=$(jq -r '.affected[]? | [(.package.ecosystem // "none"), (.package.name // "none" | .[0:0]), ([.ranges[]?.type] | join("+")), ((.versions // []) | length > 0)] | @tsv' /tmp/osv/*.json | sort | uniq -c | sort -rn)
+          report+=$'\n--- shape (count, ecosystem, _, range types, has versions)\n'"$shape"$'\n'
+          hexid=$(grep -l '"ecosystem":"Hex"' /tmp/osv/*.json | head -1)
+          report+=$'\n--- first Hex record: '"$hexid"$'\n'"$(head -c 2500 "$hexid" 2>/dev/null)"$'\n'
           msg=$(printf '%s' "$report" | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print}')
           echo "::warning title=eef-probe::$msg"
