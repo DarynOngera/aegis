@@ -124,4 +124,34 @@ defmodule DepGuard.LockDiffTest do
     assert errors(findings) == []
     assert Enum.any?(notices(findings), &(&1 =~ "lock entry changed without a version change"))
   end
+
+  test "a git-ref waiver for one app does not waive another git dependency" do
+    old = [git("foo", "https://e.com/foo.git", @sha_a), git("bar", "https://e.com/bar.git", @sha_a)]
+    new = [git("foo", "https://e.com/foo.git", @sha_b), git("bar", "https://e.com/bar.git", @sha_b)]
+    waived = [%{app: "foo", reason: "reviewed", expires: "2026-12-01"}]
+
+    findings = run(old, new, git_refs: waived)
+
+    assert [%{package: "foo", waived: %{}}] = Enum.filter(findings, & &1.waived)
+    assert [message] = errors(findings)
+    assert message =~ "bar: git ref changed"
+  end
+
+  test "a waiver must use the key that fits the rule; a missing key is never a wildcard" do
+    # downgrades are waived per :package, git ref moves per :app
+    downgrade = fn waiver ->
+      run([hex("plug", "1.16.0")], [hex("plug", "1.15.0", checksum: @checksum2)], downgrades: [waiver])
+    end
+
+    assert [_] = errors(downgrade.(%{app: "plug", reason: "r", expires: "2026-12-01"}))
+    assert [_] = errors(downgrade.(%{package: "other", reason: "r", expires: "2026-12-01"}))
+    assert [_] = errors(downgrade.(%{reason: "r", expires: "2026-12-01"}))
+
+    git_move = fn waiver ->
+      run([git("x", "https://e.com/x.git", @sha_a)], [git("x", "https://e.com/x.git", @sha_b)], git_refs: [waiver])
+    end
+
+    assert [_] = errors(git_move.(%{package: "x", reason: "r", expires: "2026-12-01"}))
+    assert [_] = errors(git_move.(%{reason: "r", expires: "2026-12-01"}))
+  end
 end

@@ -154,17 +154,27 @@ defmodule DepGuard.Report do
 
     * `2` when any operational finding exists or a source did not complete
       (`error` / `uncovered`), because the scan did not finish
+    * `2` when a source was `skipped` (for example by `--offline`), because the
+      report then proves nothing about advisories, unless the scan was run with
+      `--allow-skipped` (recorded in `inputs.allow_skipped`)
     * `1` when any unwaived finding is at or above the threshold
     * `0` otherwise
   """
   @spec exit_code(t(), :any | :low | :medium | :high | :critical) :: 0 | 1 | 2
   def exit_code(%__MODULE__{} = report, threshold) do
+    incomplete = if allow_skipped?(report), do: ["error", "uncovered"], else: ["error", "uncovered", "skipped"]
+
     cond do
       Enum.any?(report.findings, &(&1.kind == :operational)) -> 2
-      Enum.any?(report.sources, &(source_status(&1) in ["error", "uncovered"])) -> 2
+      Enum.any?(report.sources, &(source_status(&1) in incomplete)) -> 2
       Enum.any?(report.findings, &Finding.gating?(&1, threshold)) -> 1
       true -> 0
     end
+  end
+
+  # Inputs are atom-keyed in memory and string-keyed after a JSON round trip.
+  defp allow_skipped?(%__MODULE__{inputs: inputs}) do
+    inputs[:allow_skipped] == true or inputs["allow_skipped"] == true
   end
 
   # Sources are maps in memory (atom status) and after a JSON round-trip

@@ -88,7 +88,8 @@ defmodule DepGuard.Report.Human do
   end
 
   defp summary(report, 2, _threshold) do
-    "INCOMPLETE — an operational error means the scan did not finish.#{counts(report)}"
+    "INCOMPLETE — the scan did not cover every source (operational error, or a source was skipped, " <>
+      "unreachable or uncovered). Do not treat this run as clean.#{counts(report)}"
   end
 
   defp summary(report, 1, threshold) do

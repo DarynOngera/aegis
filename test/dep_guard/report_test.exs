@@ -150,4 +150,52 @@ defmodule DepGuard.ReportTest do
              %{physicalLocation: %{artifactLocation: %{uri: "mix.lock"}, region: %{startLine: 1}}}
            ]
   end
+
+  test "a skipped source makes the gate incomplete unless the scan allowed it" do
+    skipped = Report.new() |> Report.put_source(%{name: "hex_api", status: :skipped}) |> Report.finalize()
+    assert Report.exit_code(skipped, :high) == 2
+
+    allowed =
+      Report.new(inputs: %{allow_skipped: true})
+      |> Report.put_source(%{name: "hex_api", status: :skipped})
+      |> Report.finalize()
+
+    assert Report.exit_code(allowed, :high) == 0
+
+    # an error or uncovered source is never excused by allow_skipped
+    broken =
+      Report.new(inputs: %{allow_skipped: true})
+      |> Report.put_source(%{name: "hex_api", status: :error})
+      |> Report.finalize()
+
+    assert Report.exit_code(broken, :high) == 2
+
+    # the flag survives a JSON round trip (string keys)
+    round_trip = %{
+      allowed
+      | inputs: %{"allow_skipped" => true},
+        sources: [%{"name" => "hex_api", "status" => "skipped"}]
+    }
+
+    assert Report.exit_code(round_trip, :high) == 0
+  end
+
+  test "SARIF marks waived findings as suppressed with the waiver reason" do
+    waived = %{reason: "not reachable", expires: "2026-12-01"}
+
+    report =
+      Report.new(version: "0.2.0")
+      |> Report.add_findings([
+        finding(id: "GHSA-1", package: "a", path: "mix.lock", waived: waived),
+        finding(id: "GHSA-2", package: "b", path: "mix.lock")
+      ])
+      |> Report.finalize()
+
+    [run] = SARIF.to_map(report).runs
+    [suppressed, open] = run.results
+
+    assert [%{kind: "external", status: "accepted", justification: justification}] = suppressed.suppressions
+    assert justification == "waived until 2026-12-01: not reachable"
+    refute Map.has_key?(open, :suppressions)
+  end
 end
