@@ -27,6 +27,7 @@ defmodule DepGuard.CLI do
     output: :string,
     fail_on: :string,
     offline: :boolean,
+    allow_skipped: :boolean,
     cache_dir: :string,
     today: :string
   ]
@@ -101,13 +102,14 @@ defmodule DepGuard.CLI do
       Report.new(
         project: project_info(ctx.root),
         policy: ctx.policy_hashes,
-        inputs: inputs(ctx.root, base, fail_on),
+        inputs: inputs(ctx, base, fail_on, opts),
         version: @version,
         image_digest: System.get_env("DEP_GUARD_IMAGE_DIGEST")
       )
 
     report =
       report
+      |> Report.add_findings(today_notice(opts[:today]))
       |> Report.add_findings(Checks.lockfile(ctx))
       |> Report.add_findings(Checks.sources(ctx))
       |> Report.add_findings(Checks.policy_hygiene(ctx))
@@ -122,11 +124,10 @@ defmodule DepGuard.CLI do
   end
 
   defp run_sources(report, ctx, opts) do
-    fetch_opts = [
-      cache_dir: opts[:cache_dir],
-      offline: opts[:offline] || false
-    ]
+    fetch_opts = [cache_dir: opts[:cache_dir]]
 
+    # --offline skips the online sources entirely; it never serves them from the
+    # cache, so a stale cached advisory cannot pass for a fresh check.
     if opts[:offline] do
       report
       |> Report.put_source(%{name: "hex_api", status: :skipped, reason: "offline"})
@@ -136,7 +137,9 @@ defmodule DepGuard.CLI do
           check: :sources,
           kind: :notice,
           severity: :info,
-          message: "online sources skipped (--offline); the report does not prove advisory coverage"
+          message:
+            "online sources skipped (--offline); the report does not prove advisory coverage" <>
+              if(opts[:allow_skipped], do: "", else: ". The scan exits 2 unless --allow-skipped is given")
         )
       ])
     else
@@ -264,11 +267,34 @@ defmodule DepGuard.CLI do
 
   defp today(nil), do: {:ok, Date.utc_today()}
 
+  # Waiver expiry is judged against this date, so overriding it can make an
+  # expired waiver look valid. It is for tests and replays only: it needs an
+  # explicit environment opt-in, and the override is recorded in the report.
   defp today(value) do
-    case Date.from_iso8601(value) do
-      {:ok, date} -> {:ok, date}
-      {:error, _} -> {:error, "--today must be an ISO 8601 date (YYYY-MM-DD)"}
+    cond do
+      System.get_env("DEP_GUARD_ALLOW_TODAY") != "1" ->
+        {:error,
+         "--today overrides the date used for waiver expiry and is for tests only; set DEP_GUARD_ALLOW_TODAY=1 to use it"}
+
+      true ->
+        case Date.from_iso8601(value) do
+          {:ok, date} -> {:ok, date}
+          {:error, _} -> {:error, "--today must be an ISO 8601 date (YYYY-MM-DD)"}
+        end
     end
+  end
+
+  defp today_notice(nil), do: []
+
+  defp today_notice(value) do
+    [
+      Finding.new(
+        check: :policy,
+        kind: :notice,
+        severity: :info,
+        message: "evaluation date overridden with --today #{value}; waiver expiry was judged against that date"
+      )
+    ]
   end
 
   defp exclusive(opts, left, right) do
@@ -291,15 +317,23 @@ defmodule DepGuard.CLI do
   defp base_input(opts) do
     cond do
       opts[:base_lock] -> {:ok, {:file, Path.expand(opts[:base_lock])}}
-      opts[:base_ref] -> {:ok, {:ref, opts[:base_ref]}}
+      opts[:base_ref] -> base_ref(opts[:base_ref])
       true -> {:ok, nil}
     end
   end
 
-  defp inputs(root, base, fail_on) do
-    lock = Path.join(root, "mix.lock")
+  # The ref ends up in a `git show` argument; a leading dash would be read as an option.
+  defp base_ref("-" <> _ = ref), do: {:error, "--base-ref #{inspect(ref)} must not start with a dash"}
+  defp base_ref(ref), do: {:ok, {:ref, ref}}
 
-    %{lock_sha256: sha256(lock), fail_on: fail_on}
+  defp inputs(ctx, base, fail_on, opts) do
+    %{
+      lock_sha256: sha256(Path.join(ctx.root, "mix.lock")),
+      fail_on: fail_on,
+      evaluated_on: Date.to_iso8601(ctx.today),
+      today_override: not is_nil(opts[:today]),
+      allow_skipped: opts[:allow_skipped] == true
+    }
     |> Map.merge(base_inputs(base))
   end
 
@@ -321,11 +355,20 @@ defmodule DepGuard.CLI do
   defp project_info(root) do
     %{
       root: root,
-      repo: git(root, ["config", "--get", "remote.origin.url"]) || env("DEP_GUARD_REPO"),
+      repo: redact_url(git(root, ["config", "--get", "remote.origin.url"]) || env("DEP_GUARD_REPO")),
       commit: git(root, ["rev-parse", "HEAD"]) || env("DEP_GUARD_COMMIT"),
       branch: git(root, ["rev-parse", "--abbrev-ref", "HEAD"]) || env("DEP_GUARD_BRANCH")
     }
   end
+
+  @doc """
+  Removes `user:password@` from a URL. Remotes such as
+  `https://ci-user:TOKEN@host/repo.git` carry credentials, and the report is
+  uploaded as a CI artifact and as SARIF.
+  """
+  @spec redact_url(String.t() | nil) :: String.t() | nil
+  def redact_url(nil), do: nil
+  def redact_url(url) when is_binary(url), do: Regex.replace(~r{\A([A-Za-z][A-Za-z0-9+.-]*://)[^/?#\s]*@}, url, "\\1")
 
   defp env(name) do
     case System.get_env(name) do
@@ -372,14 +415,19 @@ defmodule DepGuard.CLI do
       --format FORMAT            human (default), json, sarif
       --output FILE              write the report instead of stdout
       --fail-on LEVEL            any, low, medium, high (default), critical
-      --offline                  use only cached source data
+      --offline                  skip the online sources (Hex API, EEF); the scan then
+                                 exits 2 because advisory coverage is unproven
+      --allow-skipped            accept skipped sources (only with --offline); the
+                                 report records that you did
       --cache-dir DIR            HTTP cache (default: ~/.cache/dep_guard)
-      --today YYYY-MM-DD         evaluation date (for tests)
+      --today YYYY-MM-DD         evaluation date, tests only: needs
+                                 DEP_GUARD_ALLOW_TODAY=1 and is recorded in the report
 
     Exit codes:
       0  no unwaived findings at or above --fail-on
       1  security, integrity or policy findings
-      2  operational error (bad input, unreachable source, policy mismatch)
+      2  operational error or incomplete scan (bad input, unreachable, skipped
+         or uncovered source, policy mismatch)
       3  reserved for an unsupported environment (not emitted today)
     """
   end

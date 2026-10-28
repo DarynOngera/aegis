@@ -157,7 +157,7 @@ defmodule DepGuard.LockDiff do
   defp version_problems(%Entry{} = o, %Entry{} = n, opts) do
     case compare(o.version, n.version) do
       :gt ->
-        case waiver(opts.downgrades, n) do
+        case waiver(opts.downgrades, n, :package) do
           nil ->
             [
               error(
@@ -197,7 +197,7 @@ defmodule DepGuard.LockDiff do
   defp ref_problem(%Entry{ref: r1}, %Entry{ref: r1} = _n, _opts), do: []
 
   defp ref_problem(%Entry{} = o, %Entry{} = n, opts) do
-    case waiver(opts.git_refs, n) do
+    case waiver(opts.git_refs, n, :app) do
       nil ->
         [
           error(
@@ -214,10 +214,19 @@ defmodule DepGuard.LockDiff do
     end
   end
 
-  defp waiver(waivers, entry) do
-    Enum.find(waivers, fn waiver ->
-      Map.get(waiver, :app) == entry.app or Map.get(waiver, :package) == entry.package
-    end)
+  # A waiver must name the thing it waives, using the key that fits the rule:
+  # downgrades are waived per Hex `:package`, git ref moves per `:app`. A missing
+  # key is never a wildcard. (Git entries have no package, so comparing
+  # `waiver[:package] == entry.package` used to match `nil == nil` and let one
+  # git waiver cover every git dependency.)
+  defp waiver(waivers, %Entry{} = entry, key) do
+    case Map.get(entry, key) do
+      value when is_binary(value) and value != "" ->
+        Enum.find(waivers, &(Map.get(&1, key) == value))
+
+      _other ->
+        nil
+    end
   end
 
   defp compare(a, b) do

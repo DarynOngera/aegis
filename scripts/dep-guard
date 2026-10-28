@@ -1,0 +1,177 @@
+#!/bin/sh
+# dep-guard: scan the Elixir project in the current directory with the dep_guard container.
+#
+#   scripts/dep-guard                 scan, print a summary, write reports to ./.dep_guard/
+#   scripts/dep-guard --fail-on medium
+#   scripts/dep-guard --help
+#
+# Same command locally and in CI. Reports: .dep_guard/report.json (canonical) and
+# .dep_guard/report.sarif. Exit code: 0 clean, 1 findings, 2 incomplete or error.
+set -eu
+
+usage() {
+  cat <<'EOF'
+dep-guard: scan the Elixir project in the current directory with the dep_guard container.
+
+Usage: dep-guard [scan options]     (run it from the directory that holds mix.lock)
+
+Common options (passed to `dep_guard scan`):
+  --fail-on LEVEL    any, low, medium, high (default), critical
+  --offline          skip Hex API and EEF checks (exits 2 unless --allow-skipped)
+  --allow-skipped    accept skipped sources
+  --policy FILE      project waivers (default: ./.dep_guard.exs)
+
+Do not pass --format or --output: this script always writes JSON, SARIF and a
+human summary. Reports go to ./.dep_guard/ (override with DEP_GUARD_OUT).
+
+Environment:
+  DEP_GUARD_IMAGE               image to run (default: ghcr.io/darynongera/aegis:latest);
+                                in CI use name@sha256:<digest>
+  DEP_GUARD_BASE                git ref to compare mix.lock with (default: the PR base
+                                branch in CI, otherwise origin/main or origin/master)
+  DEP_GUARD_ORG_POLICY          path to the org policy file (optional)
+  DEP_GUARD_ORG_POLICY_SHA256   expected SHA-256 of that file (optional)
+  DEP_GUARD_ROOT                project directory (default: current directory)
+  DEP_GUARD_OUT                 report directory (default: <root>/.dep_guard)
+  DEP_GUARD_NO_CACHE            set to 1 to skip the persistent HTTP cache
+EOF
+}
+
+die() {
+  echo "dep-guard: $*" >&2
+  exit 2
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --format | --format=* | --output | --output=*)
+      die "do not pass --format or --output; reports are written to the report directory (see --help)"
+      ;;
+  esac
+done
+
+command -v docker >/dev/null 2>&1 || die "docker is required: https://docs.docker.com/get-docker/"
+
+ROOT=${DEP_GUARD_ROOT:-$PWD}
+[ -f "$ROOT/mix.lock" ] || die "no mix.lock in $ROOT; run this from the project root or set DEP_GUARD_ROOT"
+[ -f "$ROOT/mix.exs" ] || die "no mix.exs in $ROOT; run this from the project root or set DEP_GUARD_ROOT"
+ROOT=$(cd "$ROOT" && pwd)
+
+IMAGE=${DEP_GUARD_IMAGE:-ghcr.io/darynongera/aegis:latest}
+OUT=${DEP_GUARD_OUT:-$ROOT/.dep_guard}
+mkdir -p "$OUT"
+OUT=$(cd "$OUT" && pwd)
+# Keep reports out of version control without asking the project to edit .gitignore.
+[ -f "$OUT/.gitignore" ] || printf '*\n' >"$OUT/.gitignore"
+rm -f "$OUT/report.json" "$OUT/report.sarif" "$OUT/base.lock"
+
+have_git=0
+if command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  have_git=1
+fi
+
+# -- base lock: what mix.lock looked like on the branch this change targets ------------
+base_ref=${DEP_GUARD_BASE:-}
+if [ -z "$base_ref" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
+  base_ref="origin/$GITHUB_BASE_REF"
+fi
+if [ -z "$base_ref" ] && [ "$have_git" = 1 ]; then
+  for candidate in origin/main origin/master; do
+    if git -C "$ROOT" rev-parse --verify -q "$candidate^{commit}" >/dev/null 2>&1; then
+      base_ref=$candidate
+      break
+    fi
+  done
+fi
+
+base_args=""
+if [ "$have_git" = 1 ] && [ -n "$base_ref" ] && git -C "$ROOT" rev-parse --verify -q "$base_ref^{commit}" >/dev/null 2>&1; then
+  if git -C "$ROOT" show "$base_ref:./mix.lock" >"$OUT/base.lock" 2>/dev/null; then
+    base_args="--base-lock /out/base.lock"
+  else
+    # mix.lock does not exist on the base branch: every dependency is new.
+    printf '%%{}\n' >"$OUT/base.lock"
+    base_args="--base-lock /out/base.lock"
+  fi
+else
+  echo "dep-guard: no base branch found, so the lock-change check is skipped." >&2
+  echo "           Set DEP_GUARD_BASE=origin/main (in CI, check out with fetch-depth: 0)." >&2
+fi
+
+# -- who and what was scanned (credentials are never passed on) -----------------------
+strip_userinfo() {
+  sed 's#^\([A-Za-z][A-Za-z0-9+.-]*://\)[^/?\# ]*@#\1#'
+}
+
+if [ -n "${GITHUB_ACTIONS:-}" ]; then
+  meta_repo=${GITHUB_REPOSITORY:-}
+  meta_commit=${GITHUB_SHA:-}
+  meta_branch=${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}
+elif [ "$have_git" = 1 ]; then
+  meta_repo=$(git -C "$ROOT" config --get remote.origin.url 2>/dev/null | strip_userinfo || true)
+  meta_commit=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)
+  meta_branch=$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+else
+  meta_repo=""
+  meta_commit=""
+  meta_branch=""
+fi
+
+# -- run ------------------------------------------------------------------------------
+set -- scan --root /workspace --format json --output /out/report.json $base_args "$@"
+
+policy_mount=""
+if [ -n "${DEP_GUARD_ORG_POLICY:-}" ]; then
+  [ -f "$DEP_GUARD_ORG_POLICY" ] || die "DEP_GUARD_ORG_POLICY $DEP_GUARD_ORG_POLICY is not a file"
+  org_dir=$(cd "$(dirname "$DEP_GUARD_ORG_POLICY")" && pwd)
+  policy_mount="-v $org_dir/$(basename "$DEP_GUARD_ORG_POLICY"):/policy/org.exs:ro"
+  set -- "$@" --org-policy /policy/org.exs
+  if [ -n "${DEP_GUARD_ORG_POLICY_SHA256:-}" ]; then
+    set -- "$@" --org-policy-sha256 "$DEP_GUARD_ORG_POLICY_SHA256"
+  fi
+fi
+
+if [ -n "${GITHUB_ACTIONS:-}" ] || [ "${DEP_GUARD_NO_CACHE:-}" = 1 ]; then
+  cache_args="--tmpfs /cache"
+else
+  cache_dir=${XDG_CACHE_HOME:-$HOME/.cache}/dep_guard
+  mkdir -p "$cache_dir"
+  cache_args="-v $cache_dir:/cache/dep_guard"
+fi
+
+run_container() {
+  # $policy_mount and $cache_args are intentionally unquoted: they hold several words,
+  # and none of them contain spaces unless the user's own paths do.
+  # shellcheck disable=SC2086
+  docker run --rm --read-only $cache_args \
+    --user "$(id -u):$(id -g)" \
+    -e DEP_GUARD_REPO="$meta_repo" \
+    -e DEP_GUARD_COMMIT="$meta_commit" \
+    -e DEP_GUARD_BRANCH="$meta_branch" \
+    -e DEP_GUARD_IMAGE_DIGEST="${DEP_GUARD_IMAGE_DIGEST:-}" \
+    -v "$ROOT:/workspace:ro" \
+    -v "$OUT:/out" \
+    $policy_mount \
+    "$IMAGE" "$@"
+}
+
+set +e
+run_container "$@"
+code=$?
+set -e
+
+if [ -s "$OUT/report.json" ]; then
+  # Re-render the saved report: one scan, several views, no second network round trip.
+  run_container render --input /out/report.json --format sarif --output /out/report.sarif || true
+  run_container render --input /out/report.json --format human || true
+  echo
+  echo "reports: $OUT/report.json  $OUT/report.sarif"
+else
+  echo "dep-guard: the scan did not produce a report (exit $code); see the message above." >&2
+fi
+
+exit "$code"

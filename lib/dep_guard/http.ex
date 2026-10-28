@@ -45,6 +45,9 @@ defmodule DepGuard.Http do
     [
       timeout: 20_000,
       connect_timeout: 5_000,
+      # Never follow redirects: one could lead from https to plain http, where
+      # advisory data could be altered in transit.
+      autoredirect: false,
       ssl: [
         verify: :verify_peer,
         cacerts: :public_key.cacerts_get(),

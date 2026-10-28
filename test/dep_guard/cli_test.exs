@@ -32,7 +32,7 @@ defmodule DepGuard.CLITest do
   end
 
   defp scan(root, extra \\ []) do
-    CLI.run(["scan", "--root", root, "--offline", "--today", "2026-10-24"] ++ extra)
+    CLI.run(["scan", "--root", root, "--offline", "--allow-skipped", "--today", "2026-10-24"] ++ extra)
   end
 
   test "a clean project passes and emits one JSON report", %{root: root} do
@@ -214,5 +214,109 @@ defmodule DepGuard.CLITest do
 
     assert {:ok, human, 0} = CLI.run(["render", "--input", json_path])
     assert human =~ "FAIL — unwaived findings at or above low"
+  end
+
+  describe "offline scans" do
+    test "exit 2 unless the skipped sources are explicitly accepted", %{root: root} do
+      run = fn extra -> CLI.run(["scan", "--root", root, "--offline"] ++ extra) end
+
+      assert {:ok, human, 2} = run.([])
+      assert human =~ "INCOMPLETE"
+
+      assert {:ok, output, 0} = run.(["--allow-skipped", "--format", "json"])
+      assert JSON.decode!(output)["inputs"]["allow_skipped"] == true
+    end
+
+    test "a saved offline report still renders as incomplete", %{root: root} do
+      path = Path.join(root, "report.json")
+      assert {:ok, "", 2} = CLI.run(["scan", "--root", root, "--offline", "--format", "json", "--output", path])
+      assert {:ok, human, 0} = CLI.run(["render", "--input", path])
+      assert human =~ "INCOMPLETE"
+    end
+  end
+
+  test "the evaluation date and any override are recorded in the report", %{root: root} do
+    assert {:ok, output, 0} = scan(root, ["--format", "json"])
+    report = JSON.decode!(output)
+
+    assert report["inputs"]["evaluated_on"] == "2026-10-24"
+    assert report["inputs"]["today_override"] == true
+    assert Enum.any?(report["notices"], &(&1["message"] =~ "evaluation date overridden with --today 2026-10-24"))
+  end
+
+  test "an expired waiver is not honoured at the real date", %{root: root} do
+    base = Path.join(root, "base.lock")
+
+    File.write!(base, """
+    %{
+      "jason": {:hex, :jason, "1.5.0", "#{@checksum}", [:mix], [], "hexpm", "#{@outer}"},
+    }
+    """)
+
+    File.write!(Path.join(root, ".dep_guard.exs"), """
+    %{allow_downgrades: [%{package: "jason", reason: "rollback", expires: "2026-01-01"}]}
+    """)
+
+    run = fn today ->
+      CLI.run(["scan", "--root", root, "--offline", "--allow-skipped", "--base-lock", base, "--today", today])
+    end
+
+    assert {:ok, _output, 1} = run.("2026-10-24")
+    assert {:ok, _output, 0} = run.("2025-12-01")
+  end
+
+  test "a git-ref waiver for one app does not waive another app's ref change", %{root: root} do
+    sha1 = String.duplicate("1", 40)
+    sha2 = String.duplicate("2", 40)
+
+    lock = fn sha ->
+      ~s|%{"foo": {:git, "https://github.com/acme/foo.git", "#{sha}", []}, "bar": {:git, "https://github.com/acme/bar.git", "#{sha}", []}}|
+    end
+
+    File.write!(Path.join(root, "mix.lock"), lock.(sha2))
+    base = Path.join(root, "base.lock")
+    File.write!(base, lock.(sha1))
+
+    org = Path.join(root, "org.exs")
+
+    File.write!(
+      org,
+      ~s|%{allowed_git: [%{app: "foo", url: "https://github.com/acme/foo.git"}, %{app: "bar", url: "https://github.com/acme/bar.git"}]}|
+    )
+
+    File.write!(
+      Path.join(root, ".dep_guard.exs"),
+      ~s|%{allow_git_refs: [%{app: "foo", reason: "bump foo", expires: "2026-12-01"}]}|
+    )
+
+    assert {:ok, output, 1} = scan(root, ["--format", "json", "--org-policy", org, "--base-lock", base])
+    findings = JSON.decode!(output)["findings"]
+
+    assert %{"waived" => true} = Enum.find(findings, &(&1["package"] == "foo"))
+    assert %{"waived" => false} = Enum.find(findings, &(&1["package"] == "bar"))
+  end
+
+  test "credentials in the repo URL never reach the report", %{root: root} do
+    System.put_env("DEP_GUARD_REPO", "https://ci-user:s3cr3t@github.com/acme/app.git")
+    on_exit(fn -> System.delete_env("DEP_GUARD_REPO") end)
+
+    assert {:ok, output, 0} = scan(root, ["--format", "json"])
+    refute output =~ "s3cr3t"
+    assert JSON.decode!(output)["project"]["repo"] =~ "github.com/acme/app.git"
+  end
+
+  test "redact_url strips userinfo and leaves other values alone" do
+    assert CLI.redact_url("https://user:pass@host/repo.git") == "https://host/repo.git"
+    assert CLI.redact_url("https://token@host/repo.git") == "https://host/repo.git"
+    assert CLI.redact_url("https://u:p@ss@host/repo.git") == "https://host/repo.git"
+    assert CLI.redact_url("https://host/repo.git") == "https://host/repo.git"
+    assert CLI.redact_url("git@github.com:acme/app.git") == "git@github.com:acme/app.git"
+    assert CLI.redact_url("acme/app") == "acme/app"
+    assert CLI.redact_url(nil) == nil
+  end
+
+  test "a --base-ref starting with a dash is rejected before git sees it", %{root: root} do
+    assert {:error, message} = scan(root, ["--base-ref=--output=/tmp/x"])
+    assert message =~ "must not start with a dash"
   end
 end

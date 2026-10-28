@@ -70,7 +70,7 @@ defmodule DepGuard.Report.SARIF do
   defp description(_check), do: "dep_guard finding"
 
   defp result(%Finding{} = f) do
-    %{
+    base = %{
       ruleId: "dep_guard/#{f.check}",
       level: level(f),
       message: %{text: f.message},
@@ -85,6 +85,25 @@ defmodule DepGuard.Report.SARIF do
         waived: not is_nil(f.waived)
       }
     }
+
+    # A waived finding must be marked suppressed, or code scanning keeps showing
+    # it as an open alert even though the gate passed.
+    case suppressions(f) do
+      [] -> base
+      list -> Map.put(base, :suppressions, list)
+    end
+  end
+
+  defp suppressions(%Finding{waived: nil}), do: []
+
+  defp suppressions(%Finding{waived: waiver}) do
+    [
+      %{
+        kind: "external",
+        status: "accepted",
+        justification: "waived until #{Map.get(waiver, :expires)}: #{Map.get(waiver, :reason)}"
+      }
+    ]
   end
 
   defp level(%Finding{kind: :notice}), do: "note"
