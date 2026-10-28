@@ -1,56 +1,50 @@
 defmodule DepGuard.Http do
   @moduledoc false
-  # Minimal HTTPS + JSON client on :httpc, so the library has no runtime dependencies.
-  # Needs OTP 25+ (`:public_key.cacerts_get/0`) and Elixir 1.18+ (built-in `JSON`) or `:jason`.
+  # Minimal HTTPS + JSON client on :httpc, so the scanner has no runtime deps.
   #
-  # Headers passed in (e.g. authorization) are never included in error messages.
+  # Returns a structured error (`status` is nil for transport errors) so callers
+  # can decide what to retry. Headers such as authorization are never included in
+  # error messages.
 
   @type headers :: [{String.t(), String.t()}]
+  @type error :: %{status: integer() | nil, message: String.t()}
 
-  @spec get_json(String.t(), headers()) :: {:ok, term()} | {:error, String.t()}
+  @spec get_json(String.t(), headers()) :: {:ok, term()} | {:error, error()}
   def get_json(url, headers \\ []) do
-    with {:ok, body} <- request(:get, url, headers, nil), do: decode(url, body)
+    with {:ok, body} <- request(url, headers), do: decode(url, body)
   end
 
-  @spec post_json(String.t(), term(), headers()) :: {:ok, term()} | {:error, String.t()}
-  def post_json(url, payload, headers \\ []) do
-    with {:ok, json} <- encode(payload),
-         {:ok, body} <- request(:post, url, headers, json),
-         do: decode(url, body)
-  end
-
-  defp request(method, url, headers, body) do
+  defp request(url, headers) do
     {:ok, _} = Application.ensure_all_started(:inets)
     {:ok, _} = Application.ensure_all_started(:ssl)
 
-    # No Accept header on purpose: cna.erlef.org answers `GET /osv/<id>.json` with HTTP 406
-    # when sent `Accept: application/json` (the .json extension already selects the format).
-    headers = Enum.map(headers, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
+    # No Accept header on purpose: cna.erlef.org answers per-record requests with
+    # HTTP 406 when sent `Accept: application/json` (the .json path selects it).
+    # hex.pm rejects requests without a User-Agent (HTTP 400).
+    headers =
+      headers
+      |> Enum.reject(fn {key, _value} -> String.downcase(key) == "user-agent" end)
+      |> then(&[{"user-agent", user_agent()} | &1])
+      |> Enum.map(fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
 
-    req =
-      case method do
-        :get -> {String.to_charlist(url), headers}
-        :post -> {String.to_charlist(url), headers, ~c"application/json", body}
-      end
+    req = {String.to_charlist(url), headers}
 
-    case :httpc.request(method, req, http_opts(), body_format: :binary) do
+    case :httpc.request(:get, req, http_opts(), body_format: :binary) do
       {:ok, {{_, 200, _}, _headers, response}} ->
         {:ok, response}
 
-      {:ok, {{_, status, _}, _headers, _response}} when status in [401, 403] ->
-        {:error, "#{method |> to_string() |> String.upcase()} #{url} returned HTTP #{status} (check the token)"}
-
       {:ok, {{_, status, _}, _headers, _response}} ->
-        {:error, "#{method |> to_string() |> String.upcase()} #{url} returned HTTP #{status}"}
+        {:error, %{status: status, message: "GET #{url} returned HTTP #{status}"}}
 
       {:error, reason} ->
-        {:error, "#{method |> to_string() |> String.upcase()} #{url} failed: #{inspect(reason)}"}
+        {:error, %{status: nil, message: "GET #{url} failed: #{inspect(reason)}"}}
     end
   end
 
   defp http_opts do
     [
       timeout: 20_000,
+      connect_timeout: 5_000,
       ssl: [
         verify: :verify_peer,
         cacerts: :public_key.cacerts_get(),
@@ -60,23 +54,17 @@ defmodule DepGuard.Http do
   end
 
   defp decode(url, body) do
-    with {:ok, decode} <- json_fun(:decode, 1) do
-      case decode.(body) do
-        {:ok, term} -> {:ok, term}
-        {:error, reason} -> {:error, "invalid JSON from #{url}: #{inspect(reason)}"}
-      end
+    case JSON.decode(body) do
+      {:ok, term} -> {:ok, term}
+      {:error, reason} -> {:error, %{status: nil, message: "invalid JSON from #{url}: #{inspect(reason)}"}}
     end
   end
 
-  defp encode(term) do
-    with {:ok, encode} <- json_fun(:encode!, 1), do: {:ok, encode.(term)}
+  defp user_agent do
+    version = Application.spec(:dep_guard, :vsn) |> to_string_or_default()
+    "dep_guard/#{version}"
   end
 
-  defp json_fun(name, arity) do
-    cond do
-      Code.ensure_loaded?(JSON) -> {:ok, Function.capture(JSON, name, arity)}
-      Code.ensure_loaded?(Jason) -> {:ok, Function.capture(Jason, name, arity)}
-      true -> {:error, "no JSON library: need Elixir 1.18+ (built-in JSON) or the :jason package"}
-    end
-  end
+  defp to_string_or_default(nil), do: "0.2.0"
+  defp to_string_or_default(value), do: to_string(value)
 end

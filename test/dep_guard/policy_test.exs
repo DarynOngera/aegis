@@ -1,7 +1,7 @@
 defmodule DepGuard.PolicyTest do
   use ExUnit.Case, async: true
 
-  alias DepGuard.Policy
+  alias DepGuard.{Finding, Policy}
 
   @today ~D[2026-10-24]
   @packages %{"plug" => "1.16.0", "jason" => "1.4.4"}
@@ -15,18 +15,37 @@ defmodule DepGuard.PolicyTest do
 
   defp problems(policy_attrs), do: Policy.problems(struct(Policy, policy_attrs), @packages, @today)
 
+  defp tmp_file(contents) do
+    path = Path.join(System.tmp_dir!(), "dep_guard_policy_#{System.unique_integer([:positive])}.exs")
+    File.write!(path, contents)
+    path
+  end
+
   test "loading a missing file gives the strict default policy" do
     assert {:ok, %Policy{ignore_advisories: [], allowed_repos: ["hexpm"], require_outer_checksum: true}} =
              Policy.load("/nonexistent/.dep_guard.exs")
   end
 
   test "loading rejects unknown keys (typos must not weaken the policy)" do
-    path = Path.join(System.tmp_dir!(), "dep_guard_policy_#{System.unique_integer([:positive])}.exs")
-    File.write!(path, "%{ignore_advisory: []}")
+    path = tmp_file("%{ignore_advisory: []}")
     on_exit(fn -> File.rm(path) end)
 
     assert {:error, message} = Policy.load(path)
     assert message =~ "unknown keys"
+  end
+
+  test "loading rejects a wrongly typed field instead of crashing" do
+    assert {:error, message} = Policy.validate(%{allowed_repos: "hexpm"}, "org.exs")
+    assert message =~ "allowed_repos has the wrong type"
+
+    assert {:error, message} = Policy.validate(%{require_outer_checksum: "yes"}, "org.exs")
+    assert message =~ "require_outer_checksum has the wrong type"
+
+    assert {:error, message} = Policy.validate(%{schema_version: 2}, "org.exs")
+    assert message =~ "schema_version must be 1"
+
+    assert {:error, message} = Policy.validate(%{allowed_repos: nil}, "org.exs")
+    assert message =~ "allowed_repos must not be nil"
   end
 
   test "a well-formed waiver has no problems" do
@@ -72,41 +91,107 @@ defmodule DepGuard.PolicyTest do
     assert [_] = problems(allowed_repos: [:hexpm])
   end
 
-  test "hex_env always sets both variables and unsets them when empty" do
-    assert Policy.hex_env(%Policy{}, @today) == [
-             {"HEX_IGNORE_ADVISORIES", nil},
-             {"HEX_IGNORE_RETIREMENTS", nil}
-           ]
+  test "project overlay can add waivers but cannot weaken allowlists" do
+    path = tmp_file(~s|%{allowed_repos: ["hexpm:evil"]}|)
+    on_exit(fn -> File.rm(path) end)
+
+    assert {:error, message} = Policy.validate_project(%{allowed_repos: ["hexpm:evil"]}, path)
+    assert message =~ "unknown keys"
+
+    assert {:ok, overlay, _sha} =
+             Policy.validate_project(%{ignore_advisories: [waiver(%{})]}, path)
+
+    assert overlay.ignore_advisories == [waiver(%{})]
   end
 
-  test "hex_env passes only unexpired waivers, with aliases" do
-    policy = %Policy{
-      ignore_advisories: [
-        waiver(%{id: "GHSA-aaaa", aliases: ["CVE-2026-1111"]}),
-        waiver(%{id: "CVE-OLD", expires: "2026-01-01"})
-      ],
-      ignore_retirements: [
-        %{package: "plug", version: "1.16.0", reason: "r", expires: "2026-12-01"},
-        %{package: "jason", reason: "r", expires: "2026-12-01"}
-      ]
-    }
+  test "layered policy merges waivers and records hashes" do
+    org = tmp_file(~s|%{allowed_repos: ["hexpm"], max_ignore_days: 30}|)
+    project = tmp_file(~s|%{ignore_retirements: [%{package: "plug", reason: "r", expires: "2026-12-01"}]}|)
+    on_exit(fn -> File.rm(org) end)
+    on_exit(fn -> File.rm(project) end)
 
-    assert [{"HEX_IGNORE_ADVISORIES", advisories}, {"HEX_IGNORE_RETIREMENTS", retirements}] =
-             Policy.hex_env(policy, @today)
+    assert {:ok, %{policy: policy, hashes: hashes}} =
+             Policy.load_layered(org: org, project: project)
 
-    assert advisories == "GHSA-aaaa,CVE-2026-1111"
-    assert retirements == "plug@1.16.0,jason"
-    assert Policy.advisory_ids(policy, @today) == ["GHSA-aaaa", "CVE-2026-1111"]
+    assert policy.allowed_repos == ["hexpm"]
+    assert policy.max_ignore_days == 30
+    assert [%{package: "plug"}] = policy.ignore_retirements
+    assert is_binary(hashes.org_sha256)
+    assert is_binary(hashes.project_sha256)
   end
 
-  test "allowed_downgrades only includes unexpired waivers" do
+  test "org policy hash mismatch is an error" do
+    org = tmp_file(~s|%{allowed_repos: ["hexpm"]}|)
+    on_exit(fn -> File.rm(org) end)
+
+    assert {:error, message} =
+             Policy.load_layered(org: org, org_sha256: String.duplicate("0", 64))
+
+    assert message =~ "SHA-256"
+  end
+
+  test "advisory waivers are scoped to their package" do
+    policy = %Policy{ignore_advisories: [waiver(%{package: "plug", id: "GHSA-1"})]}
+
+    finding_plug =
+      Finding.new(id: "GHSA-1", check: :advisories, kind: :security, severity: :high, package: "plug", message: "x")
+
+    finding_jason =
+      Finding.new(id: "GHSA-1", check: :advisories, kind: :security, severity: :high, package: "jason", message: "x")
+
+    assert %{waived: %{}} = Policy.waive(policy, finding_plug, @today)
+    refute Policy.waive(policy, finding_jason, @today).waived
+  end
+
+  test "lock waivers are scoped to the app or package they name" do
+    today = @today
+
+    git_finding =
+      Finding.new(
+        check: :lock_changes,
+        kind: :integrity,
+        severity: :high,
+        package: "foo",
+        rule: :git_ref,
+        message: "git ref changed"
+      )
+
+    other_git_finding = %{git_finding | package: "bar"}
+
     policy = %Policy{
-      allow_downgrades: [
-        %{package: "plug", reason: "r", expires: "2026-12-01"},
-        %{package: "jason", reason: "r", expires: "2026-01-01"}
-      ]
+      allow_git_refs: [%{app: "bar", reason: "known ref move", expires: "2026-12-01"}]
     }
 
-    assert Policy.allowed_downgrades(policy, @today) == ["plug"]
+    refute Policy.waive(policy, git_finding, today).waived
+    assert %{waived: %{}} = Policy.waive(policy, other_git_finding, today)
+
+    downgrade =
+      Finding.new(
+        check: :lock_changes,
+        kind: :integrity,
+        severity: :high,
+        package: "foo",
+        rule: :downgrade,
+        message: "downgraded"
+      )
+
+    # A waiver with no :package key is not a wildcard.
+    no_package = %Policy{allow_downgrades: [%{reason: "temporary", expires: "2026-12-01"}]}
+    refute Policy.waive(no_package, downgrade, today).waived
+
+    scoped = %Policy{allow_downgrades: [%{package: "bar", reason: "temporary", expires: "2026-12-01"}]}
+    refute Policy.waive(scoped, downgrade, today).waived
+    assert %{waived: %{}} = Policy.waive(scoped, %{downgrade | package: "bar"}, today)
+  end
+
+  test "expired waivers stop applying" do
+    policy = %Policy{
+      ignore_advisories: [waiver(%{package: "plug", id: "GHSA-1", expires: "2026-01-01"})]
+    }
+
+    finding =
+      Finding.new(id: "GHSA-1", check: :advisories, kind: :security, severity: :high, package: "plug", message: "x")
+
+    refute Policy.waive(policy, finding, @today).waived
   end
 end
