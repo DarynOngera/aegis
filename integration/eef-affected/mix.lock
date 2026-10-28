@@ -1,0 +1,3 @@
+%{
+  "ash_authentication_phoenix": {:hex, :ash_authentication_phoenix, "2.9.0", "f462927a4ed43f2b86de5cc09338de9b5a6dbdccc5ca8e3bc2978aa23a7f3243", [:mix], [], "hexpm", "3333333333333333333333333333333333333333333333333333333333333333"},
+}

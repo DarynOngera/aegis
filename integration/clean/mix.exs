@@ -1,14 +1,13 @@
-defmodule Integration.MixProject do
+defmodule Integration.Clean.MixProject do
   use Mix.Project
 
-  def project, do: [app: :integration, version: "0.0.0", elixir: "~> 1.16", deps: deps()]
+  def project do
+    [app: :integration_clean, version: "0.1.0", elixir: "~> 1.18", deps: deps()]
+  end
+
   def application, do: [extra_applications: [:logger]]
 
   defp deps do
-    [
-      {:jason, "~> 1.4"},
-      {:dep_guard, path: "../..", only: :test, runtime: false},
-      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false}
-    ]
+    [{:jason, "~> 1.4"}]
   end
 end

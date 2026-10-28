@@ -1,14 +1,14 @@
-defmodule Integration.MixProject do
+defmodule Integration.Vulnerable.MixProject do
   use Mix.Project
 
-  def project, do: [app: :integration, version: "0.0.0", elixir: "~> 1.16", deps: deps()]
+  def project do
+    [app: :integration_vulnerable, version: "0.1.0", elixir: "~> 1.18", deps: deps()]
+  end
+
   def application, do: [extra_applications: [:logger]]
 
+  # sweet_xml 0.6.6 is affected by GHSA-qpmc-wprv-x746 (CVE-2019-15160).
   defp deps do
-    [
-      {:sweet_xml, "~> 0.6.0"},
-      {:dep_guard, path: "../..", only: :test, runtime: false},
-      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false}
-    ]
+    [{:sweet_xml, "~> 0.6.6"}]
   end
 end
