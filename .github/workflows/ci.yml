@@ -7,66 +7,144 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  unit:
+  test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: erlef/setup-beam@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
-          otp-version: "27"
-          elixir-version: "1.18"
+          otp-version: "28.0"
+          elixir-version: "1.19.5"
       - run: mix format --check-formatted
       - run: MIX_ENV=test mix compile --warnings-as-errors
       - run: mix test
 
-  # Runs the suite against real Hex, mix_audit and the EEF feed, which the unit tests cannot reach.
-  # `pass` projects must produce no findings; `fail` projects must fail, and (if set) the output
-  # must contain `must_contain`.
+  # Builds the real container and runs it against live Hex and the EEF feed.
+  # The image is built once; every fixture uses the same digest via the local tag.
   integration:
-    needs: unit
+    needs: test
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { project: clean, expect: pass }
-          - { project: vulnerable, expect: fail, must_contain: GHSA-qpmc-wprv-x746 }
-          - { project: eef-affected, expect: fail, must_contain: EEF-CVE-2025-4754 }
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: erlef/setup-beam@v1
-        with:
-          otp-version: "27"
-          elixir-version: "1.18"
-      - name: Fetch deps
-        working-directory: integration/${{ matrix.project }}
-        run: mix deps.get
-      - name: Run suite
-        working-directory: integration/${{ matrix.project }}
-        run: |
-          set +e
-          MIX_ENV=test mix test test/security 2>&1 | tee out.log
-          status=${PIPESTATUS[0]}
-          echo "suite exit status: $status (expected: ${{ matrix.expect }})"
-          if [ "${{ matrix.expect }}" = pass ] && [ "$status" -ne 0 ]; then exit 1; fi
-          if [ "${{ matrix.expect }}" = fail ] && [ "$status" -eq 0 ]; then
-            echo "::error::expected findings, suite passed"; exit 1
-          fi
-          if [ -n "${{ matrix.must_contain }}" ] && ! grep -q "${{ matrix.must_contain }}" out.log; then
-            echo "::error::expected ${{ matrix.must_contain }} in the suite output"; exit 1
-          fi
-      - name: Surface suite output as an annotation
-        if: always()
-        working-directory: integration/${{ matrix.project }}
-        run: |
-          # Logs and artifacts sit behind storage that API clients cannot always reach;
-          # annotations are readable through the checks API.
-          msg=$(head -c 6000 out.log | tr -d '\r' | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print}')
-          echo "::warning title=suite output (${{ matrix.project }})::$msg"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: suite-log-${{ matrix.project }}
-          path: integration/${{ matrix.project }}/out.log
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Build the scanner image
+        run: |
+          docker build \
+            --build-arg REVISION="${GITHUB_SHA::12}" \
+            --tag dep_guard:ci \
+            .
+
+      - name: Smoke-test the runtime contract
+        run: |
+          set -euo pipefail
+          docker run --rm dep_guard:ci version | grep -q '^dep_guard '
+          test "$(docker run --rm --entrypoint sh dep_guard:ci -c 'command -v git || true')" = ""
+          test "$(docker run --rm --entrypoint id dep_guard:ci -u)" != "0"
+
+      - name: Scan the fixtures
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          chmod 777 out
+
+          scan() {
+            project="$1" expected="$2" needle="${3:-}"
+            echo "::group::scan ${project}"
+
+            set +e
+            docker run --rm --read-only --tmpfs /cache \
+              --user "$(id -u):$(id -g)" \
+              -v "$PWD/integration/${project}:/workspace:ro" \
+              -v "$PWD/out:/out" \
+              dep_guard:ci scan --root /workspace --format json \
+                --output "/out/${project}.json" --fail-on high
+            code=$?
+            set -e
+
+            python3 - "$project" "$expected" "$needle" <<'PY'
+          import json
+          import sys
+
+          project, expected, needle = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+          report = json.load(open(f"out/{project}.json", encoding="utf-8"))
+          statuses = {source["name"]: source["status"] for source in report["sources"]}
+
+          assert statuses["hex_api"] == "ok", statuses
+          assert statuses["eef"] == "ok", statuses
+          assert statuses["mix_audit"] == "not_included", statuses
+
+          if expected == 0:
+              assert report["findings"] == [], report["findings"]
+          else:
+              found = [finding.get("id") for finding in report["findings"]]
+              assert needle in found, found
+
+          print(f"{project}: exit {expected}, findings {report['summary']['total']}")
+          PY
+
+            if [ "$code" != "$expected" ]; then
+              echo "::error::${project}: expected exit ${expected}, got ${code}"
+              exit 1
+            fi
+            echo "::endgroup::"
+          }
+
+          scan clean 0
+          scan vulnerable 1 GHSA-qpmc-wprv-x746
+          scan eef-affected 1 EEF-CVE-2025-4754
+
+      - name: Re-render saved reports (SARIF and human, no rescan)
+        run: |
+          set -euo pipefail
+          for project in clean vulnerable; do
+            docker run --rm --read-only --tmpfs /cache \
+              -v "$PWD/out:/out" \
+              dep_guard:ci render --input "/out/${project}.json" --format sarif \
+                --output "/out/${project}.sarif"
+
+            python3 - "$project" <<'PY'
+          import json
+          import sys
+
+          project = sys.argv[1]
+          sarif = json.load(open(f"out/{project}.sarif", encoding="utf-8"))
+          assert sarif["version"] == "2.1.0"
+          [run] = sarif["runs"]
+          assert run["tool"]["driver"]["name"] == "dep_guard"
+          if project == "clean":
+              assert run["results"] == []
+          else:
+              assert run["results"]
+          print(f"{project}.sarif: ok")
+          PY
+          done
+
+      - name: Verify the merged report shape
+        run: |
+          python3 - <<'PY'
+          import json
+
+          report = json.load(open("out/vulnerable.json", encoding="utf-8"))
+          assert report["schema_version"] == "1.0"
+          assert report["tool"]["version"]
+          assert report["inputs"]["lock_sha256"]
+          finding = report["findings"][0]
+          assert finding["severity"] == "high"
+          assert finding["kind"] == "security"
+          assert "CVE-2019-15160" in finding["aliases"]
+          assert finding["sources"] == ["hex_api"]
+          print("report shape: ok")
+          PY
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: dep_guard-reports
+          path: out/
+          if-no-files-found: warn

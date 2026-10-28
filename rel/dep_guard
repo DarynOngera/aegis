@@ -1,0 +1,10 @@
+#!/bin/sh
+# Container entry point. The release binary needs `eval` to accept CLI
+# arguments; this wrapper keeps `docker run IMAGE scan ...` working.
+set -eu
+
+if [ "$#" -eq 0 ]; then
+  set -- help
+fi
+
+exec /app/bin/dep_guard eval 'DepGuard.CLI.main(System.argv())' "$@"

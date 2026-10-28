@@ -1,0 +1,10 @@
+.git
+_build
+deps
+cover
+doc
+erl_crash.dump
+integration
+test
+examples
+*.md

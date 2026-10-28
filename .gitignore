@@ -1,4 +1,7 @@
 _build/
 deps/
-integration/*/mix.lock
-integration/*/out.log
+cover/
+doc/
+out/
+/dep_guard
+erl_crash.dump
