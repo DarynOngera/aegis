@@ -19,6 +19,8 @@ dep-guard        # prints PASS or FAIL; exit 0 clean, 1 findings, 2 incomplete
 ```
 
 `dep-guard` is [one small script](scripts/dep-guard) that runs the scanner container with the right settings.
+Until the image is published to GHCR, build it once: `docker build -t dep_guard:local .` and
+`export DEP_GUARD_IMAGE=dep_guard:local` (USAGE.md, section 1).
 Install steps, the first scan, fixing a failure, GitHub CI (one `uses:` line) and org setup are in
 [`USAGE.md`](USAGE.md).
 

@@ -159,6 +159,27 @@ run_container() {
     "$IMAGE" "$@"
 }
 
+# Docker's own error for a missing or private image is just "denied", which says nothing about the fix.
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  echo "dep-guard: image $IMAGE is not on this machine; pulling it" >&2
+  if ! docker pull "$IMAGE" >/dev/null; then
+    cat >&2 <<EOF
+dep-guard: cannot pull $IMAGE
+
+  The image is not published yet, it is private and you are not logged in, or the network is down.
+  Fastest fix, build it from the source (needs git and Docker, takes a minute):
+
+    git clone https://github.com/DarynOngera/aegis /tmp/aegis && docker build -t dep_guard:local /tmp/aegis
+    export DEP_GUARD_IMAGE=dep_guard:local     # then run dep-guard again
+
+  Using a published image instead? Log in first:
+    echo "\$GITHUB_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
+  See USAGE.md, section 1, step 3.
+EOF
+    exit 2
+  fi
+fi
+
 set +e
 run_container "$@"
 code=$?
