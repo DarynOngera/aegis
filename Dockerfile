@@ -29,7 +29,7 @@ ARG REVISION=unknown
 
 LABEL org.opencontainers.image.title="dep_guard" \
       org.opencontainers.image.description="Standalone dependency scanner for Elixir projects" \
-      org.opencontainers.image.source="https://github.com/DarynOngera/dep_guard" \
+      org.opencontainers.image.source="https://github.com/DarynOngera/aegis" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}"
 

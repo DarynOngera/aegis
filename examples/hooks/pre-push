@@ -1,0 +1,20 @@
+#!/bin/sh
+# Optional git pre-push hook: scan before pushing, but only when mix.lock differs from the
+# base branch, so ordinary pushes stay instant.
+#
+# Install (from your project):
+#   cp pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+# Skip it once:   git push --no-verify     (CI still runs the scan)
+# Other base:     DEP_GUARD_BASE=origin/develop git push
+set -eu
+
+base=${DEP_GUARD_BASE:-origin/main}
+
+# No base branch to compare with (fresh clone, other default branch): do not block the push.
+git rev-parse --verify -q "$base" >/dev/null 2>&1 || exit 0
+
+# mix.lock is unchanged: nothing new to check.
+git diff --quiet "$base" -- mix.lock && exit 0
+
+echo "mix.lock differs from $base: running dep-guard"
+exec dep-guard

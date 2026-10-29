@@ -1,0 +1,103 @@
+name: dep_guard scan
+description: >-
+  Scan an Elixir project's dependencies (mix.lock) for security advisories, retired packages,
+  tampered lock entries and unapproved sources. Fails the job when the gate fails.
+author: DarynOngera
+
+inputs:
+  image:
+    description: >-
+      Scanner image. Pin it by digest in CI: ghcr.io/darynongera/aegis@sha256:<digest>.
+    required: false
+    default: ghcr.io/darynongera/aegis:latest
+  working-directory:
+    description: Directory holding mix.lock and mix.exs, relative to the repository root.
+    required: false
+    default: "."
+  fail-on:
+    description: Lowest severity that fails the job (any, low, medium, high, critical).
+    required: false
+    default: high
+  org-policy:
+    description: Path to the org policy file, relative to the repository root. Optional.
+    required: false
+    default: ""
+  org-policy-sha256:
+    description: >-
+      Expected SHA-256 of the org policy file. Set it from an org-level Actions variable that a
+      pull request cannot edit (see USAGE.md, "Org setup"). Do not put the hash in the repository.
+    required: false
+    default: ""
+  artifact-name:
+    description: >-
+      Name of the uploaded report artifact. Use a different name for each call in one job
+      (artifact names must be unique within a workflow run).
+    required: false
+    default: dep_guard-report
+  upload-sarif:
+    description: >-
+      Upload the SARIF report to GitHub code scanning. Needs `security-events: write`, and code
+      scanning (GitHub Advanced Security) on private repositories.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    # The default actions/checkout is shallow, so the pull request's base branch is missing and
+    # the lock-change check would be skipped. Fetch just that one commit.
+    - name: Fetch the base branch
+      if: github.event_name == 'pull_request'
+      shell: bash
+      env:
+        BASE_REF: ${{ github.base_ref }}
+      run: |
+        git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 origin \
+          "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}" \
+          || echo "::warning::could not fetch origin/${BASE_REF}; the lock-change check will be skipped"
+
+    - name: Scan dependencies
+      id: scan
+      shell: bash
+      env:
+        DEP_GUARD_IMAGE: ${{ inputs.image }}
+        DEP_GUARD_ROOT: ${{ github.workspace }}/${{ inputs.working-directory }}
+        DEP_GUARD_OUT: ${{ runner.temp }}/dep_guard
+        DEP_GUARD_ORG_POLICY_INPUT: ${{ inputs.org-policy }}
+        DEP_GUARD_ORG_POLICY_SHA256: ${{ inputs.org-policy-sha256 }}
+        FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        if [ -n "$DEP_GUARD_ORG_POLICY_INPUT" ]; then
+          export DEP_GUARD_ORG_POLICY="$GITHUB_WORKSPACE/$DEP_GUARD_ORG_POLICY_INPUT"
+        fi
+        "$GITHUB_ACTION_PATH/scripts/dep-guard" --fail-on "$FAIL_ON"
+
+    # hashFiles() only sees the workspace and the reports live in the runner's temp directory,
+    # so look for them explicitly.
+    - name: Locate the reports
+      id: reports
+      if: always()
+      shell: bash
+      env:
+        OUT: ${{ runner.temp }}/dep_guard
+      run: |
+        echo "dir=${OUT}" >>"$GITHUB_OUTPUT"
+        if [ -s "${OUT}/report.json" ]; then echo "json=true" >>"$GITHUB_OUTPUT"; fi
+        if [ -s "${OUT}/report.sarif" ]; then echo "sarif=true" >>"$GITHUB_OUTPUT"; fi
+
+    - name: Upload SARIF to code scanning
+      if: always() && inputs.upload-sarif == 'true' && steps.reports.outputs.sarif == 'true'
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ steps.reports.outputs.dir }}/report.sarif
+        category: dep_guard
+
+    - name: Keep the report
+      if: always() && steps.reports.outputs.json == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          ${{ steps.reports.outputs.dir }}/report.json
+          ${{ steps.reports.outputs.dir }}/report.sarif
+        if-no-files-found: ignore

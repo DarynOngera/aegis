@@ -3,6 +3,12 @@
 # Run from anywhere:  sh test/scripts/dep_guard_wrapper_test.sh
 set -eu
 
+# Start from a "local" environment. CI runners set GITHUB_ACTIONS and friends, which would switch
+# the script under test into CI mode; the tests that need CI mode set their own values.
+for var in $(env | sed -n 's/^\(\(GITHUB_\|DEP_GUARD_\)[A-Za-z0-9_]*\)=.*/\1/p') CI; do
+  unset "$var"
+done
+
 HERE=$(cd "$(dirname "$0")" && pwd)
 SCRIPT=$(cd "$HERE/../../scripts" && pwd)/dep-guard
 TMP=$(mktemp -d)
