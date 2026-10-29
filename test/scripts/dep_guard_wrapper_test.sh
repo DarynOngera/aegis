@@ -28,6 +28,10 @@ mkdir -p "$TMP/bin"
 cat >"$TMP/bin/docker" <<'EOF'
 #!/bin/sh
 echo "docker $*" >>"$FAKE_DOCKER_LOG"
+case "$1" in
+  image) [ -n "${FAKE_DOCKER_NOIMAGE:-}" ] && exit 1 || exit 0 ;;
+  pull) exit "${FAKE_DOCKER_PULL_EXIT:-0}" ;;
+esac
 out=""
 prev=""
 for arg in "$@"; do
@@ -143,6 +147,19 @@ check "CI records the repo, commit and branch" \
 P=$(new_project local)
 run "$P" || true
 check "a local run keeps a persistent cache" grep -q -- "$TMP/home/.cache/dep_guard:/cache/dep_guard" "$TMP/docker.log"
+
+# 6b. image availability -----------------------------------------------------------------------
+P=$(new_project image)
+FAKE_DOCKER_NOIMAGE=1 FAKE_DOCKER_PULL_EXIT=1 run "$P" && code=0 || code=$?
+check "an image that cannot be pulled exits 2" test "$code" = 2
+check "it says how to build the image locally" grep -q "docker build -t dep_guard:local" "$TMP/stderr"
+check "it points at DEP_GUARD_IMAGE" grep -q "DEP_GUARD_IMAGE=dep_guard:local" "$TMP/stderr"
+check "no scan is attempted without an image" sh -c "! grep -q ' scan ' '$TMP/docker.log'"
+FAKE_DOCKER_NOIMAGE=1 FAKE_DOCKER_PULL_EXIT=0 run "$P" && code=0 || code=$?
+check "a missing image that pulls fine is pulled, then the scan runs" \
+  sh -c "grep -q '^docker pull' '$TMP/docker.log' && grep -q ' scan ' '$TMP/docker.log'"
+run "$P" || true
+check "an image already present is not pulled" sh -c "! grep -q '^docker pull' '$TMP/docker.log'"
 
 # 7. preconditions ----------------------------------------------------------------------------
 mkdir -p "$TMP/empty"

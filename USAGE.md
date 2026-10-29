@@ -33,14 +33,30 @@ You need three things.
    If it prints an error about connecting, start Docker Desktop (or the Docker service).
 2. **An Elixir project with `mix.lock` committed.** Check: `ls mix.lock mix.exs` shows both files.
    If `mix.lock` is missing, run `mix deps.get` and commit it. dep_guard scans the lock, not your code.
-3. **Access to the scanner image.** The image is `ghcr.io/darynongera/aegis`. If it is private, log in
-   once with a GitHub personal access token that has the `read:packages` scope:
+3. **The scanner image.** `dep-guard` runs a container image. Pick **one** of these:
+
+   **A. Build it yourself. Works today, needs no registry.** Takes about a minute.
+
+   ```sh
+   git clone https://github.com/DarynOngera/aegis ~/aegis
+   docker build -t dep_guard:local ~/aegis
+   export DEP_GUARD_IMAGE=dep_guard:local      # add this line to ~/.bashrc or ~/.zshrc to keep it
+   ```
+
+   Check: `docker run --rm dep_guard:local version` prints `dep_guard 0.2.0` (or the current version).
+   To update later, `git -C ~/aegis pull` and run the `docker build` line again.
+
+   **B. Use the published image.** Only after the org owner has published it (section 6, step 1).
+   The image is `ghcr.io/darynongera/aegis`, and `dep-guard` uses it when `DEP_GUARD_IMAGE` is not set.
+   If the package is private, log in once with a GitHub personal access token that has the
+   `read:packages` scope:
 
    ```sh
    echo "$GITHUB_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
    ```
 
-   If `docker pull ghcr.io/darynongera/aegis:latest` works, you are already set.
+   Check: `docker pull ghcr.io/darynongera/aegis:latest` succeeds. If it says `denied`, the image has not
+   been published yet or the package is private. Use option A.
 
 ## 2. Install the `dep-guard` command
 
@@ -197,6 +213,12 @@ Run `dep-guard` again after each change until it says PASS.
 Do this once per project. It scans every pull request, and also every night, so a newly published
 advisory turns the build red even if nobody pushed.
 
+> **Needs a release first.** The workflow below refers to the tag `v0.2.0` and to a published image
+> digest. Both exist only after the org owner has done section 6, step 1 (push the tag, make the package
+> public). Until then the job fails with "unable to find version" or `denied`, and a locally built image
+> does not help, because the CI runner cannot see your machine. Running locally (section 3) does not
+> need any of this.
+
 1. Create `.github/workflows/dependency-security.yml` in your project with this content
    (also in [`examples/github/dependency-security.yml`](examples/github/dependency-security.yml)):
 
@@ -302,6 +324,12 @@ Only the person who owns the scanner and the org policy does this.
 5. Let your other repositories pull it: on GitHub open the package (your profile or org, **Packages**,
    `aegis`), **Package settings**, **Manage Actions access**, and add the repositories (or the org).
 
+6. **Make the package public** (or grant access, as in step 5). GitHub creates a new package as private, and
+   a private package answers `denied` to anyone who is not logged in. On the package page, **Package
+   settings**, **Danger Zone**, **Change visibility**, **Public**.
+7. Check from a machine that is not logged in to `ghcr.io`: `docker pull ghcr.io/darynongera/aegis:latest`.
+
+Until this is done, nobody can pull the image, so everyone uses option A in section 1 (build it locally).
 This workflow has not yet been run for the first time. If a step fails, the error message in the run says which.
 
 ### Step 2: decide the rules (the org policy)
@@ -445,7 +473,7 @@ The runtime has no `git`, so the wrapper reads the base `mix.lock` with `git sho
 | `dep-guard: command not found` | `~/.local/bin` is not on your `PATH`. See section 2. |
 | `dep-guard: docker is required` | Docker is not installed or its CLI is not on `PATH`. |
 | `failed to connect to the docker API` | Docker is installed but not running. Start it. |
-| `pull access denied` or `unauthorized` | You are not logged in to `ghcr.io`, or the token lacks `read:packages`. Section 1, step 3. |
+| `dep-guard: cannot pull ...` or `denied` / `unauthorized` | The image is not published yet, it is private and you are not logged in, or the token lacks `read:packages`. Build it locally: section 1, step 3, option A. |
 | `dep-guard: no mix.lock in ...` | You are not in the project root. `cd` to the folder with `mix.lock`, or set `DEP_GUARD_ROOT`. |
 | `no base branch found, so the lock-change check is skipped` | There is no `origin/main` or `origin/master` locally. Run `git fetch origin main`, or set `DEP_GUARD_BASE`. Everything else is still checked. |
 | Exit `2` and `eef: ... could not be fetched` | The EEF feed was unreachable or answered with errors. The scan fails closed on purpose. Check your network and run again. |
