@@ -24,8 +24,8 @@ inputs:
     default: ""
   org-policy-sha256:
     description: >-
-      Expected SHA-256 of the org policy file. Set it from an org-level variable that a pull
-      request cannot edit, for example ${{ vars.DEP_GUARD_ORG_POLICY_SHA256 }}.
+      Expected SHA-256 of the org policy file. Set it from an org-level Actions variable that a
+      pull request cannot edit (see USAGE.md, "Org setup"). Do not put the hash in the repository.
     required: false
     default: ""
   artifact-name:
