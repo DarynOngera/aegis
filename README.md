@@ -5,8 +5,8 @@ checks them against Hex and the EEF CNA advisory feed, and writes one report. It
 and is **not** added to the project's dependencies, so a project cannot skip it by changing `mix.exs`.
 
 - One scan, one report: JSON is canonical; SARIF and human output are renderings.
-- Every source records a status. `uncovered` or `error` makes the scan incomplete (exit 2); `skipped`
-  does not prove coverage.
+- Every source records a status. `uncovered`, `error` or `skipped` (for example `--offline`) makes the scan
+  incomplete (exit 2), because it proves nothing about advisories; `--allow-skipped` accepts that explicitly.
 - Missing data or an unreachable source is an operational failure (exit 2), never a silent pass.
 - The project may only waive findings; the org policy owns allowlists, limits and source requirements.
 - `mix_audit` stays an external, project-owned check. Its JSON is merged when supplied.
@@ -14,27 +14,24 @@ and is **not** added to the project's dependencies, so a project cannot skip it 
 ## Quick start
 
 ```sh
-# Scan the current project and print a human summary.
-docker run --rm --read-only --tmpfs /cache \
-  -v "$PWD:/workspace:ro" \
-  ghcr.io/acme/dep_guard@sha256:<digest> \
-  scan --root /workspace
+cd my_app        # the folder that contains mix.lock
+dep-guard        # prints PASS or FAIL; exit 0 clean, 1 findings, 2 incomplete
 ```
 
-Exit codes: `0` clean, `1` findings at or above `--fail-on` (default `high`), `2` operational error,
-`3` reserved (not emitted today).
+`dep-guard` is [one small script](scripts/dep-guard) that runs the scanner container with the right settings.
+Install steps, the first scan, fixing a failure, GitHub CI (one `uses:` line) and org setup are in
+[`USAGE.md`](USAGE.md).
 
-Write a canonical report and re-render it later without rescanning:
+Exit codes: `0` clean, `1` findings at or above `--fail-on` (default `high`), `2` the scan could not finish
+(bad input, unreachable or skipped source), `3` reserved.
+
+Without the wrapper, the container takes the same arguments:
 
 ```sh
 docker run --rm --read-only --tmpfs /cache \
   -v "$PWD:/workspace:ro" -v "$PWD/out:/out" \
-  ghcr.io/acme/dep_guard@sha256:<digest> \
+  ghcr.io/darynongera/aegis@sha256:<digest> \
   scan --root /workspace --format json --output /out/report.json
-
-docker run --rm -v "$PWD/out:/out" \
-  ghcr.io/acme/dep_guard@sha256:<digest> \
-  render --input /out/report.json --format sarif --output /out/report.sarif
 ```
 
 ## What it checks
@@ -52,13 +49,15 @@ docker run --rm -v "$PWD/out:/out" \
 
 ## Docs
 
-- [`USAGE.md`](USAGE.md): org rollout, policy layering, CI, image pinning, report schema, troubleshooting.
-- [`examples/`](examples): org policy, project waivers, a GitHub Actions workflow, MCP triage command.
+- [`USAGE.md`](USAGE.md): step-by-step usage for developers and for whoever sets it up for the org, with troubleshooting.
+- [`examples/`](examples): org policy, project waivers, a GitHub Actions workflow, a pre-push hook, MCP triage command.
 
 ## Development
 
 ```sh
 mix test
+sh test/scripts/dep_guard_wrapper_test.sh
+sh test/scripts/pre_push_hook_test.sh
 mix format --check-formatted
 MIX_ENV=test mix compile --warnings-as-errors
 mix escript.build            # local CLI, for development only

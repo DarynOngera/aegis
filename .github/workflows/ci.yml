@@ -23,6 +23,8 @@ jobs:
       - run: mix format --check-formatted
       - run: MIX_ENV=test mix compile --warnings-as-errors
       - run: mix test
+      - run: sh test/scripts/dep_guard_wrapper_test.sh
+      - run: sh test/scripts/pre_push_hook_test.sh
 
   # Builds the real container and runs it against live Hex and the EEF feed.
   # The image is built once; every fixture uses the same digest via the local tag.
@@ -141,6 +143,32 @@ jobs:
           assert finding["sources"] == ["hex_api"]
           print("report shape: ok")
           PY
+
+      # The same entry point a project uses: the composite action, which runs scripts/dep-guard
+      # against the image built above. Proves the action, the wrapper and the container together.
+      - name: Action, clean project (must pass)
+        uses: ./
+        with:
+          image: dep_guard:ci
+          working-directory: integration/clean
+          artifact-name: action-report-clean
+
+      - name: Action, vulnerable project (must fail)
+        id: action_vulnerable
+        continue-on-error: true
+        uses: ./
+        with:
+          image: dep_guard:ci
+          working-directory: integration/vulnerable
+          artifact-name: action-report-vulnerable
+
+      - name: The vulnerable project failed the job, and its report names the advisory
+        run: |
+          set -euo pipefail
+          test "${{ steps.action_vulnerable.outcome }}" = failure
+          grep -q GHSA-qpmc-wprv-x746 "${{ runner.temp }}/dep_guard/report.json"
+          test -s "${{ runner.temp }}/dep_guard/report.sarif"
+          echo "action: ok"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()

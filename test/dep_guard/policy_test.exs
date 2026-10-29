@@ -130,6 +130,18 @@ defmodule DepGuard.PolicyTest do
     assert message =~ "SHA-256"
   end
 
+  test "an advisory waiver without a package is a policy problem and waives nothing" do
+    no_package = Map.delete(waiver(%{id: "GHSA-1"}), :package)
+
+    assert [message] = problems(ignore_advisories: [no_package])
+    assert message =~ "missing :package"
+
+    finding =
+      Finding.new(id: "GHSA-1", check: :advisories, kind: :security, severity: :high, package: "plug", message: "x")
+
+    refute Policy.waive(%Policy{ignore_advisories: [no_package]}, finding, @today).waived
+  end
+
   test "advisory waivers are scoped to their package" do
     policy = %Policy{ignore_advisories: [waiver(%{package: "plug", id: "GHSA-1"})]}
 

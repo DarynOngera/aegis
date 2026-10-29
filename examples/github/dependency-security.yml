@@ -1,106 +1,38 @@
+# Copy to .github/workflows/dependency-security.yml in your project.
+#
+# Runs on every pull request, and nightly so that advisories published after your last merge
+# still turn the build red. To block merging, add the "scan" check to branch protection.
 name: dependency-security
 
 on:
   pull_request:
   schedule:
-    - cron: "17 3 * * *" # nightly: catches advisories published after the last merge
+    - cron: "17 3 * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
-
-concurrency:
-  group: dependency-security-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  # Pin the scanner image by digest. Tags move; a digest does not.
-  DEP_GUARD_IMAGE: ghcr.io/acme/dep_guard@sha256:0000000000000000000000000000000000000000000000000000000000000000
-  # SHA-256 of the org policy file. Set this as an org-level variable so a pull
-  # request cannot change the policy and its pin together.
-  ORG_POLICY_SHA256: ${{ vars.DEP_GUARD_ORG_POLICY_SHA256 }}
+  # security-events: write   # only if you turn on upload-sarif below
 
 jobs:
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    permissions:
-      contents: read
-      security-events: write # upload SARIF; only needed if code scanning is enabled
     steps:
       - uses: actions/checkout@v4
+
+      # Optional: the shared org policy, checked out next to the project. Pin ref to a commit SHA.
+      # - uses: actions/checkout@v4
+      #   with:
+      #     repository: acme/security-policy
+      #     ref: <commit sha>
+      #     path: .org-policy
+
+      # Pin this action to a commit SHA, and the image to a digest (see USAGE.md, section 6).
+      - uses: DarynOngera/aegis@v0.2.0
         with:
-          fetch-depth: 0 # needed to read the base branch's mix.lock
-
-      - name: Prepare input and output directories
-        run: |
-          mkdir -p out
-          chmod 777 out
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git show "origin/${{ github.base_ref }}:mix.lock" > out/base.lock || rm -f out/base.lock
-          fi
-
-      # Optional: mix_audit stays the project's own check. Produce its JSON and
-      # merge it into the same report. Remove this step if you do not use it.
-      - uses: erlef/setup-beam@v1
-        with:
-          version-file: .tool-versions
-          version-type: strict
-
-      - name: Run mix_audit
-        run: |
-          mix deps.get
-          mix deps.audit --format json > out/mix-audit.json || true
-
-      - name: Scan
-        run: |
-          set -euo pipefail
-          : "${DEP_GUARD_IMAGE:?set DEP_GUARD_IMAGE in the workflow env}"
-          : "${ORG_POLICY_SHA256:?set the DEP_GUARD_ORG_POLICY_SHA256 org variable}"
-
-          args=(
-            scan
-            --root /workspace
-            --org-policy /policy/org.dep_guard.exs
-            --org-policy-sha256 "${ORG_POLICY_SHA256}"
-            --format json
-            --output /out/report.json
-            --fail-on high
-          )
-          [ -s out/base.lock ] && args+=(--base-lock /out/base.lock)
-          [ -s out/mix-audit.json ] && args+=(--mix-audit-report /out/mix-audit.json)
-
-          set +e
-          docker run --rm --read-only --tmpfs /cache \
-            -e DEP_GUARD_REPO="${{ github.repository }}" \
-            -e DEP_GUARD_COMMIT="${{ github.sha }}" \
-            -e DEP_GUARD_BRANCH="${{ github.head_ref || github.ref_name }}" \
-            -v "$GITHUB_WORKSPACE:/workspace:ro" \
-            -v "$GITHUB_WORKSPACE/out:/out" \
-            -v "$GITHUB_WORKSPACE/.github/dep_guard/org.dep_guard.exs:/policy/org.dep_guard.exs:ro" \
-            "${DEP_GUARD_IMAGE}" "${args[@]}"
-          code=$?
-          set -e
-
-          # Re-render the saved report; no second scan and no network.
-          docker run --rm --read-only --tmpfs /cache \
-            -v "$GITHUB_WORKSPACE/out:/out" \
-            "${DEP_GUARD_IMAGE}" render \
-              --input /out/report.json --format sarif --output /out/dep_guard.sarif
-
-          exit "$code"
-
-      - name: Upload SARIF
-        if: always() && hashFiles('out/dep_guard.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: out/dep_guard.sarif
-          category: dep_guard
-
-      - name: Keep the report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: dep_guard-report
-          path: out/report.json
-          if-no-files-found: warn
+          image: ghcr.io/darynongera/aegis@sha256:<digest>
+          # org-policy: .org-policy/org.dep_guard.exs
+          # org-policy-sha256: ${{ vars.DEP_GUARD_ORG_POLICY_SHA256 }}
+          # upload-sarif: "true"        # code scanning; private repos need Advanced Security
+          # working-directory: apps/web # when mix.lock is not at the repository root

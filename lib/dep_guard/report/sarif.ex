@@ -40,7 +40,7 @@ defmodule DepGuard.Report.SARIF do
     %{
       name: "dep_guard",
       version: report.tool[:version] || "unknown",
-      informationUri: "https://github.com/DarynOngera/dep_guard",
+      informationUri: "https://github.com/DarynOngera/aegis",
       rules: rules(report.findings)
     }
   end

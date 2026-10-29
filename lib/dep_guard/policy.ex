@@ -288,12 +288,9 @@ defmodule DepGuard.Policy do
     end
   end
 
-  defp package_matches?(waiver, finding) do
-    case Map.get(waiver, :package) do
-      nil -> true
-      package -> package == finding.package
-    end
-  end
+  # An advisory waiver must name its package. A missing key is never a wildcard, or one waiver
+  # would cover the same advisory ID on every package.
+  defp package_matches?(waiver, finding), do: specific_package_matches?(waiver, finding)
 
   defp version_matches?(waiver, finding) do
     case Map.get(waiver, :version) do
@@ -325,7 +322,7 @@ defmodule DepGuard.Policy do
   """
   @spec problems(t(), %{optional(String.t()) => String.t()}, Date.t()) :: [String.t()]
   def problems(%__MODULE__{} = p, packages, today) do
-    waivers("ignore_advisories", p.ignore_advisories, [:id, :reason, :expires], p, packages, today) ++
+    waivers("ignore_advisories", p.ignore_advisories, [:id, :package, :reason, :expires], p, packages, today) ++
       waivers("ignore_retirements", p.ignore_retirements, [:package, :reason, :expires], p, packages, today) ++
       waivers("allow_downgrades", p.allow_downgrades, [:package, :reason, :expires], p, packages, today) ++
       waivers("allow_git_refs", p.allow_git_refs, [:app, :reason, :expires], p, packages, today) ++
